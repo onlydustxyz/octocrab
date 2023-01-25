@@ -160,9 +160,11 @@ pub mod params;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
+use http_cache_reqwest::{Cache, CacheMode, HttpCache, MokaManager};
 use once_cell::sync::Lazy;
+use reqwest::Client;
 use reqwest::{header::HeaderName, StatusCode, Url};
-use reqwest_middleware::ClientBuilder;
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, RequestBuilder};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use snafu::*;
@@ -249,6 +251,16 @@ pub fn initialise(builder: OctocrabBuilder) -> Result<Arc<Octocrab>> {
 /// ```
 pub fn instance() -> Arc<Octocrab> {
     STATIC_INSTANCE.load().clone()
+}
+
+pub fn wrap_client_with_cache(client: Client) -> ClientWithMiddleware {
+    ClientBuilder::new(client)
+        .with(Cache(HttpCache {
+            mode: CacheMode::Default,
+            manager: MokaManager::default(),
+            options: None,
+        }))
+        .build()
 }
 
 /// A builder struct for `Octocrab`, allowing you to configure the client, such
@@ -343,14 +355,13 @@ impl OctocrabBuilder {
             hmap.append(key, value.parse().unwrap());
         }
 
-        let client = ClientBuilder::new(
+        let client = wrap_client_with_cache(
             reqwest::Client::builder()
                 .user_agent("octocrab")
                 .default_headers(hmap)
                 .build()
                 .context(crate::error::HttpSnafu)?,
-        )
-        .build();
+        );
 
         Ok(Octocrab {
             client,
@@ -447,13 +458,12 @@ impl Default for Octocrab {
     fn default() -> Self {
         Self {
             base_url: Url::parse(GITHUB_BASE_URL).unwrap(),
-            client: ClientBuilder::new(
+            client: wrap_client_with_cache(
                 reqwest::ClientBuilder::new()
                     .user_agent("octocrab")
                     .build()
                     .unwrap(),
-            )
-            .build(),
+            ),
             auth_state: AuthState::None,
         }
     }
@@ -836,7 +846,7 @@ impl Octocrab {
             let status = match &result {
                 Ok(v) => Some(v.status()),
                 Err(e) => match e {
-                    reqwest_middleware::Error::Middleware(e) => None,
+                    reqwest_middleware::Error::Middleware(_e) => None,
                     reqwest_middleware::Error::Reqwest(e) => e.status(),
                 },
             };
@@ -848,7 +858,7 @@ impl Octocrab {
                     }
                 }
             }
-            let response = result.context(error::HttpSnafu)?;
+            let response = result.context(error::MiddlewareSnafu)?;
             let token_object =
                 InstallationToken::from_response(crate::map_github_error(response).await?).await?;
             token.set(token_object.token.clone());
@@ -864,28 +874,28 @@ impl Octocrab {
         let mut retries = 0;
         loop {
             // Saved request that we can retry later if necessary
-            let mut retry_request = None;
+            // let mut retry_request = None;
             match self.auth_state {
                 AuthState::None => (),
                 AuthState::App(ref app) => {
-                    retry_request = Some(request.try_clone().unwrap());
-                    request = request.bearer_auth(app.generate_bearer_token()?);
+                    // retry_request = Some(request.try_clone().unwrap());
+                    // request = request.bearer_auth(app.generate_bearer_token()?);
                 }
                 AuthState::BasicAuth {
                     ref username,
                     ref password,
                 } => {
-                    retry_request = Some(request.try_clone().unwrap());
-                    request = request.basic_auth(username, Some(password));
+                    // retry_request = Some(request.try_clone().unwrap());
+                    // request = request.basic_auth(username, Some(password));
                 }
                 AuthState::Installation { ref token, .. } => {
-                    retry_request = Some(request.try_clone().unwrap());
+                    // retry_request = Some(request.try_clone().unwrap());
                     let token = if let Some(token) = token.get() {
                         token
                     } else {
                         self.request_installation_auth_token().await?
                     };
-                    request = request.bearer_auth(token.expose_secret());
+                    // request = request.bearer_auth(token.expose_secret());
                 }
             };
 
@@ -893,7 +903,7 @@ impl Octocrab {
             let status = match &result {
                 Ok(v) => Some(v.status()),
                 Err(e) => match e {
-                    reqwest_middleware::Error::Middleware(e) => None,
+                    reqwest_middleware::Error::Middleware(_e) => None,
                     reqwest_middleware::Error::Reqwest(e) => e.status(),
                 },
             };
@@ -901,15 +911,15 @@ impl Octocrab {
                 if let AuthState::Installation { ref token, .. } = self.auth_state {
                     token.clear();
                 }
-                if let Some(retry) = retry_request {
-                    if retries < MAX_RETRIES {
-                        retries += 1;
-                        request = retry;
-                        continue;
-                    }
-                }
+                // if let Some(retry) = retry_request {
+                //     if retries < MAX_RETRIES {
+                //         retries += 1;
+                //         request = retry;
+                //         continue;
+                //     }
+                // }
             }
-            return result.context(error::HttpSnafu);
+            return result.context(error::MiddlewareSnafu);
         }
     }
 }

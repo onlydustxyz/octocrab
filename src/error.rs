@@ -18,6 +18,11 @@ pub enum Error {
         source: reqwest::Error,
         backtrace: Backtrace,
     },
+    #[snafu(display("Middleware Error: {}\nFound at {}", source, backtrace))]
+    Middleware {
+        source: reqwest_middleware::Error,
+        backtrace: Backtrace,
+    },
     #[snafu(display("Serde Error: {}\nFound at {}", source, backtrace))]
     Serde {
         source: serde_json::Error,
