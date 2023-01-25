@@ -362,9 +362,9 @@ impl<'octo> PullRequestHandler<'octo> {
 
     fn build_request<P>(
         &self,
-        mut request: reqwest::RequestBuilder,
+        mut request: reqwest_middleware::RequestBuilder,
         body: Option<&P>,
-    ) -> reqwest::RequestBuilder
+    ) -> reqwest_middleware::RequestBuilder
     where
         P: serde::Serialize + ?Sized,
     {

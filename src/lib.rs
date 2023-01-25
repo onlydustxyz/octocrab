@@ -162,6 +162,7 @@ use std::sync::{Arc, RwLock};
 
 use once_cell::sync::Lazy;
 use reqwest::{header::HeaderName, StatusCode, Url};
+use reqwest_middleware::ClientBuilder;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use snafu::*;
@@ -172,7 +173,7 @@ use models::{AppId, InstallationId, InstallationToken};
 pub use self::{
     api::{
         actions, activity, apps, current, events, gists, gitignore, issues, licenses, markdown,
-        orgs, pulls, repos, search, teams, workflows, ratelimit,
+        orgs, pulls, ratelimit, repos, search, teams, workflows,
     },
     error::{Error, GitHubError},
     from_response::FromResponse,
@@ -302,7 +303,7 @@ impl OctocrabBuilder {
     /// Authenticate as a Basic Auth
     /// username and password
     pub fn basic_auth(mut self, username: String, password: String) -> Self {
-        self.auth = Auth::Basic{ username, password };
+        self.auth = Auth::Basic { username, password };
         self
     }
 
@@ -325,7 +326,7 @@ impl OctocrabBuilder {
 
         let auth_state = match self.auth {
             Auth::None => AuthState::None,
-            Auth::Basic{ username, password } => AuthState::BasicAuth { username, password },
+            Auth::Basic { username, password } => AuthState::BasicAuth { username, password },
             Auth::PersonalToken(token) => {
                 hmap.append(
                     reqwest::header::AUTHORIZATION,
@@ -342,11 +343,14 @@ impl OctocrabBuilder {
             hmap.append(key, value.parse().unwrap());
         }
 
-        let client = reqwest::Client::builder()
-            .user_agent("octocrab")
-            .default_headers(hmap)
-            .build()
-            .context(crate::error::HttpSnafu)?;
+        let client = ClientBuilder::new(
+            reqwest::Client::builder()
+                .user_agent("octocrab")
+                .default_headers(hmap)
+                .build()
+                .context(crate::error::HttpSnafu)?,
+        )
+        .build();
 
         Ok(Octocrab {
             client,
@@ -430,7 +434,7 @@ enum AuthState {
 /// The GitHub API client.
 #[derive(Debug, Clone)]
 pub struct Octocrab {
-    client: reqwest::Client,
+    client: reqwest_middleware::ClientWithMiddleware,
     pub base_url: Url,
     auth_state: AuthState,
 }
@@ -443,10 +447,13 @@ impl Default for Octocrab {
     fn default() -> Self {
         Self {
             base_url: Url::parse(GITHUB_BASE_URL).unwrap(),
-            client: reqwest::ClientBuilder::new()
-                .user_agent("octocrab")
-                .build()
-                .unwrap(),
+            client: ClientBuilder::new(
+                reqwest::ClientBuilder::new()
+                    .user_agent("octocrab")
+                    .build()
+                    .unwrap(),
+            )
+            .build(),
             auth_state: AuthState::None,
         }
     }
@@ -800,7 +807,7 @@ impl Octocrab {
         &self,
         url: impl reqwest::IntoUrl,
         method: reqwest::Method,
-    ) -> reqwest::RequestBuilder {
+    ) -> reqwest_middleware::RequestBuilder {
         self.client.request(method, url)
     }
 
@@ -825,10 +832,16 @@ impl Octocrab {
                 )
                 .bearer_auth(app.generate_bearer_token()?)
                 .send()
-                .await
-                .and_then(|r| r.error_for_status());
+                .await;
+            let status = match &result {
+                Ok(v) => Some(v.status()),
+                Err(e) => match e {
+                    reqwest_middleware::Error::Middleware(e) => None,
+                    reqwest_middleware::Error::Reqwest(e) => e.status(),
+                },
+            };
             if let Err(ref e) = result {
-                if let Some(StatusCode::UNAUTHORIZED) = e.status() {
+                if let Some(StatusCode::UNAUTHORIZED) = status {
                     if retries < MAX_RETRIES {
                         retries += 1;
                         continue;
@@ -844,7 +857,10 @@ impl Octocrab {
     }
 
     /// Execute the given `request` using octocrab's Client.
-    pub async fn execute(&self, mut request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    pub async fn execute(
+        &self,
+        mut request: reqwest_middleware::RequestBuilder,
+    ) -> Result<reqwest::Response> {
         let mut retries = 0;
         loop {
             // Saved request that we can retry later if necessary
@@ -855,7 +871,10 @@ impl Octocrab {
                     retry_request = Some(request.try_clone().unwrap());
                     request = request.bearer_auth(app.generate_bearer_token()?);
                 }
-                AuthState::BasicAuth { ref username, ref password } => {
+                AuthState::BasicAuth {
+                    ref username,
+                    ref password,
+                } => {
                     retry_request = Some(request.try_clone().unwrap());
                     request = request.basic_auth(username, Some(password));
                 }
@@ -870,18 +889,23 @@ impl Octocrab {
                 }
             };
 
-            let result = request.send().await.and_then(|r| r.error_for_status());
-            if let Err(ref e) = result {
-                if let Some(StatusCode::UNAUTHORIZED) = e.status() {
-                    if let AuthState::Installation { ref token, .. } = self.auth_state {
-                        token.clear();
-                    }
-                    if let Some(retry) = retry_request {
-                        if retries < MAX_RETRIES {
-                            retries += 1;
-                            request = retry;
-                            continue;
-                        }
+            let result = request.send().await;
+            let status = match &result {
+                Ok(v) => Some(v.status()),
+                Err(e) => match e {
+                    reqwest_middleware::Error::Middleware(e) => None,
+                    reqwest_middleware::Error::Reqwest(e) => e.status(),
+                },
+            };
+            if let Some(StatusCode::UNAUTHORIZED) = status {
+                if let AuthState::Installation { ref token, .. } = self.auth_state {
+                    token.clear();
+                }
+                if let Some(retry) = retry_request {
+                    if retries < MAX_RETRIES {
+                        retries += 1;
+                        request = retry;
+                        continue;
                     }
                 }
             }
