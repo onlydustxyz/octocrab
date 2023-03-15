@@ -61,7 +61,6 @@ pub struct Comment {
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -78,4 +77,6 @@ pub struct PullRequestLink {
     pub html_url: Url,
     pub diff_url: Url,
     pub patch_url: Url,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<chrono::DateTime<chrono::Utc>>,
 }
